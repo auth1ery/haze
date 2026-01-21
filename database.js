@@ -1,130 +1,171 @@
-const Database = require('better-sqlite3');
-const db = new Database('database.db');
+const initSqlJs = require('sql.js');
+const fs = require('fs');
+const path = require('path');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    user_id TEXT PRIMARY KEY,
-    username TEXT DEFAULT 'player',
-    wins INTEGER DEFAULT 0,
-    losses INTEGER DEFAULT 0,
-    elo INTEGER DEFAULT 1000,
-    created_at INTEGER DEFAULT (strftime('%s', 'now'))
-  );
+const dbPath = path.join(__dirname, 'database.db');
+let db = null;
 
-  CREATE TABLE IF NOT EXISTS matches (
-    match_id TEXT PRIMARY KEY,
-    player1_id TEXT NOT NULL,
-    player2_id TEXT NOT NULL,
-    player1_score INTEGER DEFAULT 0,
-    player2_score INTEGER DEFAULT 0,
-    winner_id TEXT,
-    start_time INTEGER NOT NULL,
-    end_time INTEGER,
-    state TEXT DEFAULT 'active',
-    FOREIGN KEY (player1_id) REFERENCES users(user_id),
-    FOREIGN KEY (player2_id) REFERENCES users(user_id),
-    FOREIGN KEY (winner_id) REFERENCES users(user_id)
-  );
+async function initDatabase() {
+  const SQL = await initSqlJs();
+  
+  try {
+    const buffer = fs.readFileSync(dbPath);
+    db = new SQL.Database(buffer);
+  } catch (err) {
+    db = new SQL.Database();
+  }
 
-  CREATE INDEX IF NOT EXISTS idx_matches_state ON matches(state);
-  CREATE INDEX IF NOT EXISTS idx_matches_players ON matches(player1_id, player2_id);
-  CREATE INDEX IF NOT EXISTS idx_users_elo ON users(elo DESC);
-`);
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      user_id TEXT PRIMARY KEY,
+      username TEXT DEFAULT 'player',
+      wins INTEGER DEFAULT 0,
+      losses INTEGER DEFAULT 0,
+      elo INTEGER DEFAULT 1000,
+      created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    );
 
-const createUser = db.prepare(`
-  INSERT INTO users (user_id, username)
-  VALUES (?, ?)
-`);
+    CREATE TABLE IF NOT EXISTS matches (
+      match_id TEXT PRIMARY KEY,
+      player1_id TEXT NOT NULL,
+      player2_id TEXT NOT NULL,
+      player1_score INTEGER DEFAULT 0,
+      player2_score INTEGER DEFAULT 0,
+      winner_id TEXT,
+      start_time INTEGER NOT NULL,
+      end_time INTEGER,
+      state TEXT DEFAULT 'active',
+      FOREIGN KEY (player1_id) REFERENCES users(user_id),
+      FOREIGN KEY (player2_id) REFERENCES users(user_id),
+      FOREIGN KEY (winner_id) REFERENCES users(user_id)
+    );
 
-const getUser = db.prepare(`
-  SELECT * FROM users WHERE user_id = ?
-`);
+    CREATE INDEX IF NOT EXISTS idx_matches_state ON matches(state);
+    CREATE INDEX IF NOT EXISTS idx_matches_players ON matches(player1_id, player2_id);
+    CREATE INDEX IF NOT EXISTS idx_users_elo ON users(elo DESC);
+  `);
 
-const updateUsername = db.prepare(`
-  UPDATE users SET username = ? WHERE user_id = ?
-`);
+  saveDatabase();
+}
 
-const updateUserStats = db.prepare(`
-  UPDATE users 
-  SET wins = ?, losses = ?, elo = ?
-  WHERE user_id = ?
-`);
+function saveDatabase() {
+  if (db) {
+    const data = db.export();
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(dbPath, buffer);
+  }
+}
 
-const createMatch = db.prepare(`
-  INSERT INTO matches (match_id, player1_id, player2_id, start_time)
-  VALUES (?, ?, ?, ?)
-`);
+setInterval(saveDatabase, 30000);
 
-const getMatch = db.prepare(`
-  SELECT * FROM matches WHERE match_id = ?
-`);
+function run(sql, params = []) {
+  db.run(sql, params);
+  saveDatabase();
+}
 
-const updateMatchScore = db.prepare(`
-  UPDATE matches 
-  SET player1_score = ?, player2_score = ?
-  WHERE match_id = ?
-`);
+function get(sql, params = []) {
+  const results = db.exec(sql, params);
+  if (results.length === 0) return null;
+  
+  const columns = results[0].columns;
+  const values = results[0].values[0];
+  
+  if (!values) return null;
+  
+  const row = {};
+  columns.forEach((col, i) => {
+    row[col] = values[i];
+  });
+  return row;
+}
 
-const endMatch = db.prepare(`
-  UPDATE matches 
-  SET winner_id = ?, end_time = ?, state = 'finished'
-  WHERE match_id = ?
-`);
-
-const getLeaderboard = db.prepare(`
-  SELECT user_id, username, wins, losses, elo
-  FROM users
-  ORDER BY elo DESC
-  LIMIT 100
-`);
-
-const getUserMatchHistory = db.prepare(`
-  SELECT * FROM matches 
-  WHERE (player1_id = ? OR player2_id = ?)
-  AND state = 'finished'
-  ORDER BY end_time DESC
-  LIMIT 20
-`);
+function all(sql, params = []) {
+  const results = db.exec(sql, params);
+  if (results.length === 0) return [];
+  
+  const columns = results[0].columns;
+  const values = results[0].values;
+  
+  return values.map(row => {
+    const obj = {};
+    columns.forEach((col, i) => {
+      obj[col] = row[i];
+    });
+    return obj;
+  });
+}
 
 module.exports = {
+  init: initDatabase,
+  
   createUser: (userId) => {
     const username = `player_${userId.slice(-4)}`;
-    return createUser.run(userId, username);
+    run(
+      'INSERT INTO users (user_id, username) VALUES (?, ?)',
+      [userId, username]
+    );
   },
   
   getUser: (userId) => {
-    return getUser.get(userId);
+    return get(
+      'SELECT * FROM users WHERE user_id = ?',
+      [userId]
+    );
   },
   
   updateUsername: (userId, username) => {
-    return updateUsername.run(username, userId);
+    run(
+      'UPDATE users SET username = ? WHERE user_id = ?',
+      [username, userId]
+    );
   },
   
   updateUserStats: (userId, wins, losses, elo) => {
-    return updateUserStats.run(wins, losses, elo, userId);
+    run(
+      'UPDATE users SET wins = ?, losses = ?, elo = ? WHERE user_id = ?',
+      [wins, losses, elo, userId]
+    );
   },
   
   createMatch: (matchId, player1Id, player2Id) => {
-    return createMatch.run(matchId, player1Id, player2Id, Date.now());
+    run(
+      'INSERT INTO matches (match_id, player1_id, player2_id, start_time) VALUES (?, ?, ?, ?)',
+      [matchId, player1Id, player2Id, Date.now()]
+    );
   },
   
   getMatch: (matchId) => {
-    return getMatch.get(matchId);
+    return get(
+      'SELECT * FROM matches WHERE match_id = ?',
+      [matchId]
+    );
   },
   
   updateMatchScore: (matchId, player1Score, player2Score) => {
-    return updateMatchScore.run(player1Score, player2Score, matchId);
+    run(
+      'UPDATE matches SET player1_score = ?, player2_score = ? WHERE match_id = ?',
+      [player1Score, player2Score, matchId]
+    );
   },
   
   endMatch: (matchId, winnerId) => {
-    return endMatch.run(winnerId, Date.now(), matchId);
+    run(
+      'UPDATE matches SET winner_id = ?, end_time = ?, state = ? WHERE match_id = ?',
+      [winnerId, Date.now(), 'finished', matchId]
+    );
   },
   
   getLeaderboard: () => {
-    return getLeaderboard.all();
+    return all(
+      'SELECT user_id, username, wins, losses, elo FROM users ORDER BY elo DESC LIMIT 100',
+      []
+    );
   },
   
   getUserMatchHistory: (userId) => {
-    return getUserMatchHistory.all(userId, userId);
+    return all(
+      'SELECT * FROM matches WHERE (player1_id = ? OR player2_id = ?) AND state = ? ORDER BY end_time DESC LIMIT 20',
+      [userId, userId, 'finished']
+    );
   }
 };
